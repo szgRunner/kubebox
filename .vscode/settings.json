@@ -1,0 +1,7 @@
+{
+    "editor.tokenColorCustomizations":{},
+    "editor.codeActionsOnSave": {
+        "source.organizeImports": true
+    },
+    "editor.maxTokenizationLineLength": 20000
+}
