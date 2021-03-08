@@ -1,8 +1,7 @@
 = Kubebox [small]#^⎈❏^#
-current kubebox version has delete cadvisor、tab debug,at the sametime i had add module podquery podyaml!
 Antonin Stefanutti <https://github.com/astefanutti[@astefanutti]>
 // Meta
-:description: Terminal and Web console for Kubernetes
+:description: Terminal and Web console for Kubernetes, current kubebox version has delete cadvisor、tab debug,at the sametime i had add module podquery podyaml!
 // Settings
 :idprefix:
 :idseparator: -
