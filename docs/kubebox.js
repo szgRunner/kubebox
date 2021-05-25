@@ -713,10 +713,10 @@ const { isNotEmpty, isLocalStorageAvailable, safeGet } = require('../util');
 
 class KubeConfigManager extends EventEmitter {
 
-  constructor({ debug, server }) {
+  constructor({ log, server }) {
     super();
     if (os.platform() === 'browser') {
-      const kube_config = readKubeConfigFromLocalStore({ debug });
+      const kube_config = readKubeConfigFromLocalStore({ log });
       this.contexts = kube_config.contexts;
       this.current_context = kube_config.current_context;
       if (server) {
@@ -725,7 +725,7 @@ class KubeConfigManager extends EventEmitter {
         this.current_context = kube_config.current_context ? this.server_contexts.find(c => c.name === this.current_context.name) : undefined;
       }
     } else {
-      const kube_config = readKubeConfigFromFiles({ debug });
+      const kube_config = readKubeConfigFromFiles({ log });
       this.contexts = loadContexts(kube_config);
       // TODO: support client access information provided as CLI options
       //       CLI option -> Kube config context -> prompt user
@@ -806,7 +806,7 @@ class KubeConfigManager extends EventEmitter {
   }
 }
 
-function readKubeConfigFromFiles({ debug }) {
+function readKubeConfigFromFiles({ log }) {
   let files;
   if (process.env.KUBECONFIG) {
     files = process.env.KUBECONFIG.split(path.delimiter);
@@ -818,14 +818,14 @@ function readKubeConfigFromFiles({ debug }) {
     try {
       fs.accessSync(file, fs.constants.F_OK | fs.constants.R_OK);
     } catch (error) {
-      debug.log(`{red-fg}Unable to read Kube config file from '${file}'{/red-fg}`);
+      log(`{red-fg}Unable to read Kube config file from '${file}'{/red-fg}`);
       return merged;
     }
     let config;
     try {
       config = yaml.safeLoad(fs.readFileSync(file, 'utf8'));
     } catch (error) {
-      debug.log(`{red-fg}Unable to deserialize Kube config file from '${file}': ${error.message}{/red-fg}`);
+      log(`{red-fg}Unable to deserialize Kube config file from '${file}': ${error.message}{/red-fg}`);
       return merged;
     }
     // Resolve pathes relative to the location of the kubeconfig file
@@ -862,7 +862,7 @@ function readKubeConfigFromFiles({ debug }) {
   });
 }
 
-function readKubeConfigFromLocalStore({ debug }) {
+function readKubeConfigFromLocalStore({ log }) {
   const kube_config = isLocalStorageAvailable() && localStorage.getItem('.kube-config');
   if (kube_config) {
     try {
@@ -887,7 +887,7 @@ function readKubeConfigFromLocalStore({ debug }) {
       });
     } catch (error) {
       localStorage.removeItem('.kube-config');
-      debug.log(`Unable to load '.kube-config' from local storage: ${error}`);
+      log(`Unable to load '.kube-config' from local storage: ${error}`);
     }
   }
   return { contexts: [], current_context: undefined };
@@ -3112,6 +3112,7 @@ const { error } = require('../error');
 const { pause } = require('../promise');
 const { focus: { focusIndicator }, setLabel, spinner: { until }} = require('./ui');
 const { scroll, throttle } = require('./blessed/scroll');
+const fillPodYaml = require('./yaml');
 
 // const statsPollRateMs = 10000;
 
@@ -3336,6 +3337,25 @@ class Dashboard extends EventEmitter {
         .catch(error => {
           if (error) console.error(error.stack);
         });
+    });
+
+    pods_table.key(['y'], () => {
+      // no selection
+      if (!pods_table.selected) return;
+
+      const pod = pods_list.items[pods_table.selected - 1];
+      const name = pod.metadata.name;
+      const namespace = pod.metadata.namespace;
+      const id = `${namespace}-${name}`;
+      // check if connection already exists
+      if (navbar.select(id)) return;
+      // non-running pod
+      // if (!k8s.isPodRunning(pod)) return;
+      navbar.add({
+        id     : id,
+        title:  'Yaml',
+        render: _ => fillPodYaml(screen, client, namespace, name)
+      }, { select: true, closable: true});
     });
 
     pods_table.on('select', (item, i) => {
@@ -3917,7 +3937,7 @@ function containerLogsLabel(pod, container, { tag, style } = {}) {
 
 module.exports = Dashboard;
 
-},{"../error":10,"../kubernetes":12,"../promise":14,"../task":"task","../util":41,"./blessed/scroll":26,"./events":30,"./exec":31,"./logs":34,"./navbar":36,"./ui":39,"blessed":"blessed","events":"events","lodash.debounce":428,"moment":434,"moment-duration-format":433}],29:[function(require,module,exports){
+},{"../error":10,"../kubernetes":12,"../promise":14,"../task":"task","../util":41,"./blessed/scroll":26,"./events":30,"./exec":31,"./logs":34,"./navbar":36,"./ui":39,"./yaml":40,"blessed":"blessed","events":"events","lodash.debounce":428,"moment":434,"moment-duration-format":433}],29:[function(require,module,exports){
 'use strict';
 
 const blessed = require('blessed');
@@ -5200,7 +5220,7 @@ class NavBar {
         fg : 'black',
       },
       // TODO: add click handler that display Kubebox about modal
-      content : '{|}',
+      content : 'iecas',
     });
 
     const tabs = blessed.listbar({
@@ -5567,7 +5587,7 @@ function promptPod(screen, client, { current_namespace, promptAfterRequest } = {
 
         searchPod.on('key escape', () => {
             close_pods_ui();
-            fulfill(current_namespace);
+            // fulfill();
         });
 
         list.on('select', item => {
@@ -5709,47 +5729,75 @@ module.exports.login = require('./login');
 module.exports.Logs = require('./logs');
 module.exports.namespaces = require('./namespaces');
 module.exports.pods = require('./pods');
-module.exports.yaml = require('./yaml');
 module.exports.NavBar = require('./navbar').NavBar;
 
-},{"./dashboard":28,"./exec":31,"./focus":32,"./login":33,"./logs":34,"./namespaces":35,"./navbar":36,"./pods":37,"./spinner":38,"./yaml":40,"blessed":"blessed"}],40:[function(require,module,exports){
+},{"./dashboard":28,"./exec":31,"./focus":32,"./login":33,"./logs":34,"./namespaces":35,"./navbar":36,"./pods":37,"./spinner":38,"blessed":"blessed"}],40:[function(require,module,exports){
 'use strict';
 
 const blessed = require('blessed');
 
+const { highlight, plain } = require('cli-highlight');
+const { focus: { focusIndicator }, spinner: { until }} = require('./ui');
 const { scroll, throttle } = require('./blessed/scroll');
 
-const yaml = screen => blessed.with(scroll, throttle).log({
-  screen : screen,
-  label  : 'Yaml',
-  tags   : false,
-  top    : 1,
-  bottom : 1,
-  width  : '100%',
-  border : 'line',
-  keys   : true,
-  mouse  : true,
-  scrollable : true,
-  scrollbar  : {
-    ch    : ' ',
-    style : { bg: 'white' },
-    track : {
-      style : { bg: 'grey' },
-    }
-  },
-  style : {
-    label : { bold: true },
-  }
-});
+function Yaml(screen, yamlLabel) {
+  // TODO: add filtering
 
-module.exports = screen => {
-  const y = yaml(screen);
-  return {
-    yaml: y
+  const yaml_table = blessed.with( focusIndicator, scroll, throttle).listtable({
+    parent: screen,
+    label:  yamlLabel,
+    top: 1,
+    width: '100%',
+    height: '100%-1',
+    border: 'line',
+    align: 'left',
+    keys: true,
+    tags: true,
+    mouse: true,
+    noCellBorders: true,
+    invertSelected: false,
+    scrollbar: {
+      ch: ' ',
+      style: { bg: 'white' },
+      track: {
+        style: { bg: 'grey' },
+      },
+    },
+    style: {
+      label: { bold: true },
+      header: { fg: 'grey' },
+      cell: { selected: { bold: true, fg: 'black', bg: 'white' } },
+    },
   }
-};
+  );
 
-},{"./blessed/scroll":26,"blessed":"blessed"}],41:[function(require,module,exports){
+  return { yaml_table }
+}
+
+function fillPodYaml(screen, client, namespace, podName) {
+
+  const label = `${namespace}-${podName}-Yaml`;
+  const { yaml_table } = Yaml(screen, label);
+
+  const { promise, _ } = client.pod(namespace, podName).asYaml().get({ cancellable: true, rejectOnAbort: true });
+  until(promise)
+    .do(yaml_table, yaml_table.setLabel).spin(s => `${s} Yaml`).fail(_ => 'Yaml')
+    .then(response => {
+      const yaml = response.body.toString('utf8');
+      yaml_table.setContent(highlight(yaml, { language: 'yaml', ignoreIllegals: true, theme: { string: plain } }));
+      yaml_table.screen.render();
+    }).catch(error => {
+      if (!error) return;
+      //debug.log(`{red-fg}Error fetching event ${namespace}/${name}{/red-fg}`);
+      yaml_table.setContent(`{red-fg}${error.toString()}{/red-fg}`);
+      yaml_table.screen.render();
+    });
+  // screen.render();
+}
+
+module.exports = fillPodYaml;
+
+},{"./blessed/scroll":26,"./ui":39,"blessed":"blessed","cli-highlight":146}],41:[function(require,module,exports){
 'use strict';
 
 const os = require('os');
@@ -128203,7 +128251,7 @@ class Kubebox extends EventEmitter {
     if (server) {
       client.master_api = server;
     } else {
-      kube_config = new KubeConfig({ });
+      kube_config = new KubeConfig({ log, server });
       this.loadKubeConfig = config => kube_config.loadFromConfig(config);
       if (kube_config.current_context) {
         client.master_api = kube_config.current_context.getMasterApi();
