@@ -1194,7 +1194,7 @@ module.exports.newLineReader = function* (generator) {
 },{"buffer":141}],12:[function(require,module,exports){
 'use strict';
 
-const { toTitleCase, splitCamelCase } = require('./util');
+const { toTitleCase, splitCamelCase, isNotNullOrUndefined } = require('./util');
 
 // This logic is replicated from k8s (at this writing, Kubernetes 1.15)
 // (See https://github.com/kubernetes/kubernetes/blob/release-1.15/pkg/printers/internalversion/printers.go)
@@ -1202,12 +1202,14 @@ const { toTitleCase, splitCamelCase } = require('./util');
 module.exports.podRestartCount = function (pod){
     let restartCount = 0;
     let containerStatuses =  pod.status.containerStatuses;
-    if (containerStatuses.length > 0) {
-      for (let index = 0; index < containerStatuses.length; index++) {
-        let containerStatus = containerStatuses[index];
-        // restartCount = restartCount + containerStatus.restartCount;
-        restartCount += containerStatus.restartCount;
-      }
+    if (isNotNullOrUndefined(containerStatuses)) {
+      if (containerStatuses.length > 0) {
+        for (let index = 0; index < containerStatuses.length; index++) {
+          let containerStatus = containerStatuses[index];
+          // restartCount = restartCount + containerStatus.restartCount;
+          restartCount += containerStatus.restartCount;
+        }
+      } 
     } 
     return '' + restartCount;
 }
@@ -3099,6 +3101,7 @@ const blessed      = require('blessed'),
       duration     = require('moment-duration-format'),
       EventEmitter = require('events'),
       Events       = require('./events'),
+      Yaml       = require('./yaml'),
       Exec         = require('./exec'),
       k8s          = require('../kubernetes'),
       Logs         = require('./logs'),
@@ -3112,7 +3115,6 @@ const { error } = require('../error');
 const { pause } = require('../promise');
 const { focus: { focusIndicator }, setLabel, spinner: { until }} = require('./ui');
 const { scroll, throttle } = require('./blessed/scroll');
-const fillPodYaml = require('./yaml');
 
 // const statsPollRateMs = 10000;
 
@@ -3346,15 +3348,17 @@ class Dashboard extends EventEmitter {
       const pod = pods_list.items[pods_table.selected - 1];
       const name = pod.metadata.name;
       const namespace = pod.metadata.namespace;
-      const id = `${namespace}-${name}`;
+      const id = `yaml-${namespace}-${name}`;
       // check if connection already exists
       if (navbar.select(id)) return;
       // non-running pod
       // if (!k8s.isPodRunning(pod)) return;
+      const yaml_tab = new Yaml({ screen, client, status, namespace: current_namespace, podName: name });
       navbar.add({
         id     : id,
-        title:  'Yaml',
-        render: _ => fillPodYaml(screen, client, namespace, name)
+        title:  `Yaml ${name}`,
+        // render: _ => Yaml(client, namespace, name)
+        listener: yaml_tab
       }, { select: true, closable: true});
     });
 
@@ -5734,70 +5738,84 @@ module.exports.NavBar = require('./navbar').NavBar;
 },{"./dashboard":28,"./exec":31,"./focus":32,"./login":33,"./logs":34,"./namespaces":35,"./navbar":36,"./pods":37,"./spinner":38,"blessed":"blessed"}],40:[function(require,module,exports){
 'use strict';
 
-const blessed = require('blessed');
+const blessed = require('blessed'),
+      EventEmitter = require('events');
 
+const { SelectEvent} = require('./navbar');      
 const { highlight, plain } = require('cli-highlight');
 const { focus: { focusIndicator }, spinner: { until }} = require('./ui');
 const { scroll, throttle } = require('./blessed/scroll');
 
-function Yaml(screen, yamlLabel) {
-  // TODO: add filtering
+class Yaml extends EventEmitter {
+  constructor({ screen, client, status, namespace, podName }) {
 
-  const yaml_table = blessed.with( focusIndicator, scroll, throttle).listtable({
-    parent: screen,
-    label:  yamlLabel,
-    top: 1,
-    width: '100%',
-    height: '100%-1',
-    border: 'line',
-    align: 'left',
-    keys: true,
-    tags: true,
-    mouse: true,
-    noCellBorders: true,
-    invertSelected: false,
-    scrollbar: {
-      ch: ' ',
-      style: { bg: 'white' },
-      track: {
-        style: { bg: 'grey' },
+    super();
+
+    const label = `${namespace}-${podName}-Yaml`;
+    const yaml_table = blessed.with( focusIndicator, scroll, throttle).box({
+      parent: screen,
+      label:  label,
+      top: 1,
+      width: '100%',
+      height: '100%',
+      border: 'line',
+      align: 'left',
+      keys   : true,
+      tags   : true,
+      mouse  : true,
+      noCellBorders : true,
+      scrollable    : true,
+      scrollbar: {
+        ch: ' ',
+        style: { bg: 'white' },
+        track: {
+          style: { bg: 'grey' },
+        },
       },
-    },
-    style: {
-      label: { bold: true },
-      header: { fg: 'grey' },
-      cell: { selected: { bold: true, fg: 'black', bg: 'white' } },
-    },
-  }
-  );
-
-  return { yaml_table }
-}
-
-function fillPodYaml(screen, client, namespace, podName) {
-
-  const label = `${namespace}-${podName}-Yaml`;
-  const { yaml_table } = Yaml(screen, label);
-
-  const { promise, _ } = client.pod(namespace, podName).asYaml().get({ cancellable: true, rejectOnAbort: true });
-  until(promise)
-    .do(yaml_table, yaml_table.setLabel).spin(s => `${s} Yaml`).fail(_ => 'Yaml')
-    .then(response => {
-      const yaml = response.body.toString('utf8');
-      yaml_table.setContent(highlight(yaml, { language: 'yaml', ignoreIllegals: true, theme: { string: plain } }));
-      yaml_table.screen.render();
-    }).catch(error => {
-      if (!error) return;
-      //debug.log(`{red-fg}Error fetching event ${namespace}/${name}{/red-fg}`);
-      yaml_table.setContent(`{red-fg}${error.toString()}{/red-fg}`);
-      yaml_table.screen.render();
+      style: {
+        label: { bold: true },
+        // header: { fg: 'grey' },
+        // cell: { selected: { bold: true, fg: 'black', bg: 'white' } },
+      },
     });
-  // screen.render();
+
+
+
+    this.on(SelectEvent, ({ screen }) => {
+      screen.append(yaml_table);
+      screen.append(status);
+      fillPodYaml(client, namespace, podName);
+    });
+
+    function fillPodYaml(client, namespace, podName) {
+    
+      yaml_table.setContent('');
+      // yaml_table.resetScroll();
+    
+      const { promise, _ } = client.pod(namespace, podName).asYaml().get({ cancellable: true, rejectOnAbort: true });
+      until(promise)
+        .do(yaml_table, yaml_table.setLabel).spin(s => `${s} Yaml`).fail(_ => 'Yaml')
+        .succeed(_ => `Yaml {grey-fg}[${namespace}/${podName}]{/grey-fg}`)
+        .then(response => {
+          const yaml = response.body.toString('utf8');
+          yaml_table.setContent(highlight(yaml, { language: 'yaml', ignoreIllegals: true, theme: { string: plain } }));
+          yaml_table.screen.render();
+        }).catch(error => {
+          if (!error) return;
+          //debug.log(`{red-fg}Error fetching event ${namespace}/${name}{/red-fg}`);
+          yaml_table.setContent(`{red-fg}${error.toString()}{/red-fg}`);
+          yaml_table.screen.render();
+        });
+        // screen.render();
+    }
+
+  }
 }
 
-module.exports = fillPodYaml;
 
-},{"./blessed/scroll":26,"./ui":39,"blessed":"blessed","cli-highlight":146}],41:[function(require,module,exports){
+module.exports = Yaml;
+
+},{"./blessed/scroll":26,"./navbar":36,"./ui":39,"blessed":"blessed","cli-highlight":146,"events":"events"}],41:[function(require,module,exports){
 'use strict';
 
 const os = require('os');
@@ -5903,6 +5921,13 @@ module.exports.isLocalStorageAvailable = function () {
       // acknowledge QuotaExceededError only if there's something already stored
       storage.length !== 0;
   }
+}
+
+module.exports.isNotNullOrUndefined = function(obj){
+   if (undefined === obj || null === obj){
+     return false;
+   }
+      return true;
 }
 
 },{"os":436}],42:[function(require,module,exports){
