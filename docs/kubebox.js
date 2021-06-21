@@ -3122,7 +3122,7 @@ class Dashboard extends EventEmitter {
 
   constructor({ screen, navbar, status, client }) {
     super();
-    let current_namespace, pod_selected, container_selected, pods_list = [];
+    let current_namespace, pod_selected, container_selected, pods_list = {};
     const cancellations = new task.Cancellations();
     const dashboard = this;
 
@@ -3483,7 +3483,9 @@ class Dashboard extends EventEmitter {
       const logs = client.pod(namespace, pod.metadata.name).log({ container: container.name }).get({ generator: logger });
       cancellations.add('dashboard.pod.logs', logs.cancellation);
       until(logs.promise)
-        .spin(s => pod_log.setLabel(`${s} Logs {grey-fg}[${container.name}]{/grey-fg}`))
+        // .spin(s => pod_log.setLabel(`${s} Logs {grey-fg}[${container.name}]{/grey-fg}`))
+        .do(pod_log, pod_log.setLabel)
+        .spin(s => `${s} Logs {grey-fg}[${container.name}]{/grey-fg}`)
         .cancel(c => cancellations.add('dashboard.pod.logs', c))
         .catch(error => {
           pod_log.setLabel(`Logs {grey-fg}[${container.name}]{/grey-fg}`);
@@ -3767,6 +3769,7 @@ class Dashboard extends EventEmitter {
       current_namespace = null;
       pod_selected = null;
       container_selected = null;
+      pods_list = {};
       // reset dashboard widgets
       pods_table.setLabel('Pods');
       pods_table.setData([]);
@@ -3791,7 +3794,8 @@ class Dashboard extends EventEmitter {
       const promise = until(client.pods(current_namespace).get())
         .do(pods_table, pods_table.setLabel)
         .spin(s => `${s} Pods {grey-fg}[${current_namespace}]{/grey-fg}`)
-        .succeed(_ => `Pods {grey-fg}[${current_namespace}]{/grey-fg}`)
+        // .succeed(_ => `Pods {grey-fg}[${current_namespace}]{/grey-fg}`)
+        .done(_ => `Pods {grey-fg}[${current_namespace}]{/grey-fg}`)
         .then(response => {
           pods_list = JSON.parse(response.body.toString('utf8'));
           pods_list.items = pods_list.items || [];
@@ -4190,7 +4194,7 @@ class Events extends EventEmitter {
     }
 
     function substractFromMoment(moment, duration) {
-      const regex = /(\d+)([d|m|s])/g;
+      const regex = /(\d+)([d|h|m|s])/g;
       let d;
       while ((d = regex.exec(duration)) !== null) {
         const [, n, u] = d;
@@ -4240,7 +4244,8 @@ class Events extends EventEmitter {
       const index = object => events_list.rows.findIndex(e => e.object.metadata.uid === object.object.metadata.uid);
       try {
         let change;
-        while (change = JSON.parse(yield)) {
+        while (change = yield) {
+          change = JSON.parse(change);
           const now = Date.now();
           change.object.rows.forEach(row => withLastMoment(row, now));
           switch (change.type) {
@@ -4994,13 +4999,14 @@ class Logs extends XTerm {
 module.exports = Logs;
 
 },{"./blessed-xterm/blessed-xterm":16,"clipboardy":139,"os":436}],35:[function(require,module,exports){
+(function (Buffer){
 'use strict';
 
 const blessed = require('blessed');
 const { setLabel, spinner: { until } } = require('./ui');
 const { scroll, throttle } = require('./blessed/scroll');
 
-function namespaces_ui(screen) {
+function namespaces_ui() {
   // TODO: display a list table with some high level info about the namespaces
   const box = blessed.box({
     top    : 'center',
@@ -5057,29 +5063,23 @@ function namespaces_ui(screen) {
     inputOnFocus : true,
   });
 
+  // This is a hack to not 'rewind' the focus stack on 'blur'
+  search.options.inputOnFocus = false;
+
   return { search, box, list };
 }
 
 function prompt(screen, client, { current_namespace, promptAfterRequest } = { promptAfterRequest: false }) {
   return new Promise(function (fulfill, reject) {
-    const { search, box, list } = namespaces_ui(screen);
+    const { search, box, list } = namespaces_ui();
     let namespaces = [], message;
 
-    // Canonical way of extending components in Blessed
-    search.__oolistener = search._listener;
-    search._listener = function (ch, key) {
-      if (['up', 'down', 'pageup', 'pagedown', 'enter'].includes(key.name)) {
-        return list.emit('keypress', ch, key);
-      }
-      const ret = this.__oolistener(ch, key);
-      updateList();
-      screen.render();
-      return ret;
-    };
-
     function updateList() {
+      const tokens = search.value.split(/\s+/).filter(w => w);
       const items = (namespaces.items || [])
-        .filter(n => n.metadata.name.includes(search.value))
+        // Token matching
+        .filter(n => tokens.every(token => n.metadata.name.includes(token)))
+        // Color highlighting
         .map(n => {
           const item = n.metadata.name;
           if (search.value.length === 0) {
@@ -5088,13 +5088,28 @@ function prompt(screen, client, { current_namespace, promptAfterRequest } = { pr
             }
             return item;
           }
-          const regex = new RegExp(search.value, 'g');
-          let match, lastIndex = 0, res = '';
-          while ((match = regex.exec(item)) !== null) {
-            res += item.substring(lastIndex, match.index) + '{yellow-fg}' + search.value + '{/yellow-fg}';
-            lastIndex = regex.lastIndex;
+          // Highlight tokens (a bitset would probably be more efficient)
+          const matches = Buffer.alloc(item.length);
+          // Build the matching intervals
+          tokens.forEach(token => {
+            const regex = new RegExp(token, 'g');
+            let match;
+            while ((match = regex.exec(item)) !== null) {
+              matches.fill(1, match.index, match.index + token.length);
+            }
+          });
+          // Re-assemble the final string with the tags
+          let res = '', index = 0, match = false;
+          for (let i = 0; i < matches.length; i++) {
+            const m = matches.readUInt8(i) > 0;
+            if (match == m) continue;
+            res += item.substring(index, i);
+            res += m ? '{yellow-fg}' : '{/yellow-fg}';
+            index = i;
+            match = m;
           }
-          res += item.substring(lastIndex);
+          res += item.substring(index);
+          // Highlight current namespace
           if (item === current_namespace) {
             res = `{blue-fg}${res}{/blue-fg}`;
           }
@@ -5133,13 +5148,13 @@ function prompt(screen, client, { current_namespace, promptAfterRequest } = { pr
       screen.grabKeys = true;
       screen.grabMouse = true;
       screen.append(box);
-      search.focus();
       list.grabMouse = true;
       screen.render();
+      search.focus();
     }
 
     function close_namespaces_ui() {
-      box.detach();
+      box.destroy();
       screen.restoreFocus();
       screen.grabKeys = false;
       screen.grabMouse = false;
@@ -5149,17 +5164,37 @@ function prompt(screen, client, { current_namespace, promptAfterRequest } = { pr
     function list_message(text, options = {}) {
       if (message) message.destroy();
       message = blessed.text(Object.assign({
-        parent  : list,
+        parent  : box,
         tags    : true,
-        top     : '50%-1',
+        top     : 'center',
         left    : 'center',
-        width   : 'shrink',
-        height  : 'shrink',
-        align   : 'center',
-        valign  : 'middle',
         content : text,
       }, options));
     }
+
+    // Canonical way of extending components in Blessed
+    search.__oolistener = search._listener;
+    search._listener = function (ch, key) {
+      if (['up', 'down', 'pageup', 'pagedown', 'enter'].includes(key.name)) {
+        return list.emit('keypress', ch, key);
+      }
+      const ret = this.__oolistener(ch, key);
+      if ('escape' === key.name) {
+        close_namespaces_ui();
+        fulfill(current_namespace);
+        return ret;
+      }
+      updateList();
+      screen.render();
+      return ret;
+    };
+
+    list.on('select', item => {
+      if (item) {
+        close_namespaces_ui();
+        fulfill(blessed.helpers.cleanTags(item.getContent()));
+      }
+    });
 
     if (promptAfterRequest) {
       request_namespaces()
@@ -5170,28 +5205,18 @@ function prompt(screen, client, { current_namespace, promptAfterRequest } = { pr
       until(request_namespaces())
         .do(box, setLabel).spin(s => `${s} Namespaces`).done(_ => 'Namespaces')
         .catch(error => {
-          close_namespaces_ui();
-          reject(error);
+          list_message(`{red-fg}Error: ${error.message}{/red-fg}`);
+          console.error(error.stack);
+          screen.render();
         });
     }
-
-    search.on('key escape', () => {
-      close_namespaces_ui();
-      fulfill(current_namespace);
-    });
-
-    list.on('select', item => {
-      if (item) {
-        close_namespaces_ui();
-        fulfill(blessed.helpers.cleanTags(item.getContent()));
-      }
-    });
   });
 }
 
 module.exports.prompt = prompt;
 
-},{"./blessed/scroll":26,"./ui":39,"blessed":"blessed"}],36:[function(require,module,exports){
+}).call(this,require("buffer").Buffer)
+},{"./blessed/scroll":26,"./ui":39,"blessed":"blessed","buffer":141}],36:[function(require,module,exports){
 const blessed  = require('blessed'),
       Carousel = require('./blessed-contrib/carousel');
 
@@ -5741,7 +5766,7 @@ module.exports.NavBar = require('./navbar').NavBar;
 const blessed = require('blessed'),
       EventEmitter = require('events');
 
-const { SelectEvent} = require('./navbar');      
+const { AddEvent, SelectEvent } = require('./navbar');      
 const { highlight, plain } = require('cli-highlight');
 const { focus: { focusIndicator }, spinner: { until }} = require('./ui');
 const { scroll, throttle } = require('./blessed/scroll');
@@ -5783,9 +5808,13 @@ class Yaml extends EventEmitter {
 
     this.on(SelectEvent, ({ screen }) => {
       screen.append(yaml_table);
-      screen.append(status);
+      // screen.append(status);
       fillPodYaml(client, namespace, podName);
     });
+
+    this.on(AddEvent, ({ screen, page }) => {
+      page.focus = yaml_table;
+    })
 
     function fillPodYaml(client, namespace, podName) {
     
@@ -128117,7 +128146,9 @@ function* decode(gen, socket) {
         case 0x8:
           // handle connection close in the 'end' event handler
           socket.end();
-          break;
+          // break;
+          // return directly
+          return gen.next().value;
       }
       data = data.slice(frame.offset);
       frame = undefined;
@@ -128448,7 +128479,7 @@ class Kubebox extends EventEmitter {
         .then(call(_ => {
           cancellations.run('connect');
           // it may be better to reset the dashboard when authentication has succeeded
-          dashboard.reset();
+          dashboard.reset(page);
         }))
         .then(updateSessionAfterLogin)
         .then(login => connect(login, Object.assign({}, options, { closable: false })));
